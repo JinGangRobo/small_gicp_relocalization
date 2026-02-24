@@ -28,6 +28,7 @@
 #include "small_gicp/pcl/pcl_point.hpp"
 #include "small_gicp/registration/reduction_omp.hpp"
 #include "small_gicp/registration/registration.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_broadcaster.h"
 #include "tf2_ros/transform_listener.h"
@@ -49,6 +50,7 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcd_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_when_err_cmd_sub_;
 
   int num_threads_;
   int num_neighbors_;
@@ -56,6 +58,9 @@ private:
   float registered_leaf_size_;
   float max_dist_sq_;
   std::vector<double> init_pose_;
+
+  bool reset_when_err_;
+  int converge_failure_count_;
 
   std::string map_frame_;
   std::string odom_frame_;

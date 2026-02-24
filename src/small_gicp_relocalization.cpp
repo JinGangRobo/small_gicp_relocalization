@@ -66,6 +66,9 @@ SmallGicpRelocalizationNode::SmallGicpRelocalizationNode(const rclcpp::NodeOptio
   }
   previous_result_t_ = result_t_;
 
+  converge_failure_count_ = 0;
+  reset_when_err_ = true;
+
   accumulated_cloud_ = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
   global_map_ = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
   register_ = std::make_shared<
@@ -96,6 +99,10 @@ SmallGicpRelocalizationNode::SmallGicpRelocalizationNode(const rclcpp::NodeOptio
   initial_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "initialpose", 10,
     std::bind(&SmallGicpRelocalizationNode::initialPoseCallback, this, std::placeholders::_1));
+
+  reset_when_err_cmd_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+    "small_gicp/reset_when_err", 10,
+    [&](const std_msgs::msg::Bool::SharedPtr msg) { reset_when_err_ = msg->data; });
 
   register_timer_ = this->create_wall_timer(
     std::chrono::milliseconds(500),  // 2 Hz
@@ -174,7 +181,35 @@ void SmallGicpRelocalizationNode::performRegistration()
   if (result.converged) {
     result_t_ = previous_result_t_ = result.T_target_source;
   } else {
-    RCLCPP_WARN(this->get_logger(), "GICP did not converge.");
+    RCLCPP_WARN(this->get_logger(), "GICP did not converge. Reset setting: %d", reset_when_err_);
+    if (reset_when_err_) {
+      converge_failure_count_++;
+
+      if (converge_failure_count_ >= 5) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "GICP failed to converge too much. Resetting pose to initial. Counter: %d",
+          converge_failure_count_);
+
+        Eigen::Isometry3d map_to_robot_base = Eigen::Isometry3d::Identity();
+        map_to_robot_base.translation() << 0, 0, 0;
+        map_to_robot_base.linear() = Eigen::Quaterniond(1, 0, 0, 0).toRotationMatrix();
+
+        try {
+          auto transform = tf_buffer_->lookupTransform(
+            robot_base_frame_, current_scan_frame_id_, tf2::TimePointZero);
+          Eigen::Isometry3d robot_base_to_odom = tf2::transformToEigen(transform.transform);
+          Eigen::Isometry3d map_to_odom = map_to_robot_base * robot_base_to_odom;
+
+          previous_result_t_ = result_t_ = map_to_odom;
+          converge_failure_count_ = 0;
+        } catch (tf2::TransformException & ex) {
+          RCLCPP_WARN(
+            this->get_logger(), "Could not transform initial pose from %s to %s: %s",
+            robot_base_frame_.c_str(), current_scan_frame_id_.c_str(), ex.what());
+        }
+      }
+    }
   }
 
   accumulated_cloud_->clear();
