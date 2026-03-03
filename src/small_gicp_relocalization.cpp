@@ -179,11 +179,16 @@ void SmallGicpRelocalizationNode::performRegistration()
   auto result = register_->align(*target_, *source_, *target_tree_, previous_result_t_);
 
   if (result.converged) {
-    result_t_ = previous_result_t_ = result.T_target_source;
+    if (converge_failure_count_ > -5) {
+      result_t_ = previous_result_t_ = result.T_target_source;
+      converge_failure_count_--;
+    }
   } else {
-    RCLCPP_WARN(this->get_logger(), "GICP did not converge. Reset setting: %d", reset_when_err_);
+    RCLCPP_WARN(
+      this->get_logger(), "GICP did not converge. Reset:%d, Lock:%d", reset_when_err_,
+      converge_failure_count_ <= -5);
     if (reset_when_err_) {
-      converge_failure_count_++;
+      if (converge_failure_count_ > -5) converge_failure_count_++;
 
       if (converge_failure_count_ >= 5) {
         RCLCPP_ERROR(
