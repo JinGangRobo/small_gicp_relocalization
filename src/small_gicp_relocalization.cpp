@@ -14,6 +14,9 @@
 
 #include "small_gicp_relocalization/small_gicp_relocalization.hpp"
 
+#include <cstdint>
+#include <diagnostic_msgs/msg/detail/diagnostic_status__struct.hpp>
+
 #include "pcl/common/transforms.h"
 #include "pcl_conversions/pcl_conversions.h"
 #include "small_gicp/pcl/pcl_registration.hpp"
@@ -26,7 +29,9 @@ namespace small_gicp_relocalization
 SmallGicpRelocalizationNode::SmallGicpRelocalizationNode(const rclcpp::NodeOptions & options)
 : Node("small_gicp_relocalization", options),
   result_t_(Eigen::Isometry3d::Identity()),
-  previous_result_t_(Eigen::Isometry3d::Identity())
+  previous_result_t_(Eigen::Isometry3d::Identity()),
+  diagnosis_updater_(this),
+  health_check_(HealthCheck::INITIALIZING)
 {
   this->declare_parameter("num_threads", 4);
   this->declare_parameter("num_neighbors", 20);
@@ -55,6 +60,8 @@ SmallGicpRelocalizationNode::SmallGicpRelocalizationNode(const rclcpp::NodeOptio
   this->get_parameter("prior_pcd_file", prior_pcd_file_);
   this->get_parameter("init_pose", init_pose_);
   this->get_parameter("input_cloud_topic", input_cloud_topic_);
+
+  diagnosis_updater_.setHardwareID("gicp_relocalization");
 
   // [x, y, z, roll, pitch, yaw] - init_pose parameters
   if (!init_pose_.empty() && init_pose_.size() >= 6) {
@@ -111,11 +118,37 @@ SmallGicpRelocalizationNode::SmallGicpRelocalizationNode(const rclcpp::NodeOptio
   transform_timer_ = this->create_wall_timer(
     std::chrono::milliseconds(50),  // 20 Hz
     std::bind(&SmallGicpRelocalizationNode::publishTransform, this));
+
+  diagnosis_updater_.add("Registration Status", [this](auto & stat) {
+    switch (health_check_) {
+      case HealthCheck::INITIALIZING:
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::STALE, "Initializing");
+        return;
+      case HealthCheck::NO_SCAN_WARN:
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "No scan received");
+        return;
+      case HealthCheck::BAD_CONVERGENCE_WARN:
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "Bad convergence");
+        return;
+      case HealthCheck::TF_LOOKUP_WARN:
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "TF lookup failed");
+        return;
+      case HealthCheck::MAP_LOAD_ERR:
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR, "Failed to load map");
+        return;
+      case HealthCheck::OK:
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Operational");
+        return;
+    }
+  });
+
+  diagnosis_updater_.force_update();
 }
 
 void SmallGicpRelocalizationNode::loadGlobalMap(const std::string & file_name)
 {
   if (pcl::io::loadPCDFile<pcl::PointXYZ>(file_name, *global_map_) == -1) {
+    updateHealthStatus(HealthCheck::MAP_LOAD_ERR);
     RCLCPP_ERROR(this->get_logger(), "Couldn't read PCD file: %s", file_name.c_str());
     return;
   }
@@ -134,6 +167,7 @@ void SmallGicpRelocalizationNode::loadGlobalMap(const std::string & file_name)
                               << odom_to_lidar_odom.rotation().eulerAngles(0, 1, 2).transpose());
       break;
     } catch (tf2::TransformException & ex) {
+      updateHealthStatus(HealthCheck::TF_LOOKUP_WARN);
       RCLCPP_WARN(this->get_logger(), "TF lookup failed: %s Retrying...", ex.what());
       rclcpp::sleep_for(std::chrono::seconds(1));
     }
@@ -155,6 +189,7 @@ void SmallGicpRelocalizationNode::registeredPcdCallback(
 void SmallGicpRelocalizationNode::performRegistration()
 {
   if (accumulated_cloud_->empty()) {
+    updateHealthStatus(HealthCheck::NO_SCAN_WARN);
     RCLCPP_WARN(this->get_logger(), "No accumulated points to process.");
     return;
   }
@@ -183,12 +218,17 @@ void SmallGicpRelocalizationNode::performRegistration()
       result_t_ = previous_result_t_ = result.T_target_source;
       converge_failure_count_--;
     }
+    updateHealthStatus(HealthCheck::OK, true);
   } else {
     RCLCPP_WARN(
       this->get_logger(), "GICP did not converge. Reset:%d, Lock:%d", reset_when_err_,
       converge_failure_count_ <= -5);
+
     if (reset_when_err_) {
-      if (converge_failure_count_ > -5) converge_failure_count_++;
+      if (converge_failure_count_ > -5) {
+        updateHealthStatus(HealthCheck::BAD_CONVERGENCE_WARN);
+        converge_failure_count_++;
+      }
 
       if (converge_failure_count_ >= 5) {
         RCLCPP_ERROR(
@@ -209,6 +249,7 @@ void SmallGicpRelocalizationNode::performRegistration()
           previous_result_t_ = result_t_ = map_to_odom;
           converge_failure_count_ = 0;
         } catch (tf2::TransformException & ex) {
+          updateHealthStatus(HealthCheck::TF_LOOKUP_WARN);
           RCLCPP_WARN(
             this->get_logger(), "Could not transform initial pose from %s to %s: %s",
             robot_base_frame_.c_str(), current_scan_frame_id_.c_str(), ex.what());
@@ -218,6 +259,7 @@ void SmallGicpRelocalizationNode::performRegistration()
   }
 
   accumulated_cloud_->clear();
+  diagnosis_updater_.force_update();
 }
 
 void SmallGicpRelocalizationNode::publishTransform()
@@ -269,9 +311,18 @@ void SmallGicpRelocalizationNode::initialPoseCallback(
 
     previous_result_t_ = result_t_ = map_to_odom;
   } catch (tf2::TransformException & ex) {
+    updateHealthStatus(HealthCheck::TF_LOOKUP_WARN);
     RCLCPP_WARN(
       this->get_logger(), "Could not transform initial pose from %s to %s: %s",
       robot_base_frame_.c_str(), current_scan_frame_id_.c_str(), ex.what());
+  }
+}
+
+void SmallGicpRelocalizationNode::updateHealthStatus(HealthCheck status, bool clear_old)
+{
+  if (static_cast<uint8_t>(health_check_) < static_cast<uint8_t>(status) || clear_old) {
+    health_check_ = status;
+    diagnosis_updater_.force_update();
   }
 }
 

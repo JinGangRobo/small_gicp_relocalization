@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "diagnostic_updater/diagnostic_updater.hpp"
+#include "diagnostic_updater/publisher.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "pcl/io/pcd_io.h"
 #include "rclcpp/rclcpp.hpp"
@@ -36,6 +38,15 @@
 namespace small_gicp_relocalization
 {
 
+enum class HealthCheck {
+  OK = 0,
+  INITIALIZING = 1,
+  MAP_LOAD_ERR = 5,
+  BAD_CONVERGENCE_WARN = 2,
+  NO_SCAN_WARN = 3,
+  TF_LOOKUP_WARN = 4,
+};
+
 class SmallGicpRelocalizationNode : public rclcpp::Node
 {
 public:
@@ -47,6 +58,7 @@ private:
   void performRegistration();
   void publishTransform();
   void initialPoseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+  void updateHealthStatus(HealthCheck status, bool clear_old = false);
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcd_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_;
@@ -92,6 +104,9 @@ private:
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+  diagnostic_updater::Updater diagnosis_updater_;
+  HealthCheck health_check_;
 };
 
 }  // namespace small_gicp_relocalization
