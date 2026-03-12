@@ -226,7 +226,7 @@ void SmallGicpRelocalizationNode::performRegistration()
 
     if (reset_when_err_) {
       if (converge_failure_count_ > -5) {
-        updateHealthStatus(HealthCheck::BAD_CONVERGENCE_WARN);
+        updateHealthStatus(HealthCheck::BAD_CONVERGENCE_WARN, true);
         converge_failure_count_++;
       }
 
